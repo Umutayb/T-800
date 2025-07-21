@@ -55,7 +55,7 @@ public class AppTest {
         chrome.quit();
     }
 
-    @org.junit.Test
+    @Test
     public void crawl() throws IOException {
         String url = getQueryUrl("What is the difference between verification and validation");
 
