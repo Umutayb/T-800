@@ -1,5 +1,6 @@
 package arnold.fucaptcha;
 
+import arnold.App;
 import arnold.fucaptcha.omniparser.OmniParser;
 import arnold.fucaptcha.omniparser.models.ElementClassificationResponse;
 import arnold.fucaptcha.vllm.CaptchaTargetIndexes;
@@ -8,13 +9,24 @@ import ollama.Ollama;
 import ollama.models.inference.InferenceModel;
 import org.apache.commons.io.FileUtils;
 import org.openqa.selenium.*;
+import org.openqa.selenium.Dimension;
+import org.openqa.selenium.Point;
 import org.openqa.selenium.interactions.Actions;
 import org.openqa.selenium.remote.RemoteWebDriver;
 import utils.FileUtilities;
 import utils.NumericUtilities;
+import utils.arrays.ArrayUtilities;
+
+import javax.imageio.ImageIO;
+import java.awt.*;
+import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
+import java.time.Duration;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Random;
 
 public class CaptchaBuster {
@@ -35,6 +47,7 @@ public class CaptchaBuster {
     }
 
     public void bustIt() throws IOException {
+        Dimension originalWindow = driver.manage().window().getSize();
         Dimension window = new Dimension(896, 896);
         driver.manage().window().setSize(window);
 
@@ -48,73 +61,122 @@ public class CaptchaBuster {
             do {
                 driver.switchTo().parentFrame();
                 WebElement selectionIframe = driver.findElement(iframeSelectionFrameLocator);
-                centerElement(selectionIframe, driver);
-
+//TODO write a script to download the image from captcha iframe, upscale it, divide it programatically, have each image analysed, index images, click the ones with the object
                 String ssPath = getSS();
-//                File croppedAndAnnotatedSS = new File(ssPath);
                 driver.switchTo().frame(selectionIframe);
-                WebElement captchaSelectionFrame = driver.findElement(By.id("rc-imageselect"));
-
-
-                //BufferedImage fullImg = ImageIO.read(croppedAndAnnotatedSS);
-//
-                //Point point = captchaSelectionFrame.getLocation();
-//
-                //int eleWidth = captchaSelectionFrame.getSize().getWidth();
-                //int eleHeight = captchaSelectionFrame.getSize().getHeight();
-//
-                //BufferedImage eleScreenshot = fullImg.getSubimage(point.getX() + 80, point.getY(), eleWidth, eleHeight);
-                //ImageIO.write(eleScreenshot, "png", croppedAndAnnotatedSS);
-//
-                //ImageIO.write(eleScreenshot, "png", croppedAndAnnotatedSS); // Or a new file if you don't want to overwrite
-                ElementClassificationResponse classificationResponse = omni.upload(ssPath).idEnrichment();
-                FileUtilities.saveDecodedImage(
-                        classificationResponse.getSom_image_base64(),
-                        new File("AnnotatedSS#" + new Random().nextInt() + ".png")
-                );
 
                 String captchaObject = getCaptchaObjectName(
                         modelName,
-                        classificationResponse.getSom_image_base64(),
+                        FileUtilities.getEncodedString(ssPath),
                         ollama
                 ).getObjectName();
 
                 System.out.println("Object: " + captchaObject);
 
-                List<Integer> targetIndexes = getCaptchaTargetIndexes(
-                        modelName,
-                        classificationResponse.getSom_image_base64(),
-                        captchaObject,
-                        ollama
-                ).getTargetIndexes();
+                int correctChoiceCounter = 0;
+                List<WebElement> correctOptions;
+                List<Integer> forbiddenIndexes  = new ArrayList<>();
+                do {
+                    List<WebElement> captchaOptions = driver.findElements(By.cssSelector("[role='button'].rc-imageselect-tile"));
+                    correctOptions = new ArrayList<>();
+                    File screenshot = driver.getScreenshotAs(OutputType.FILE);
+                    BufferedImage fullImg = ImageIO.read(screenshot);
+                    for (WebElement element : captchaOptions){
+                        if (forbiddenIndexes.contains(captchaOptions.indexOf(element)) || Objects.requireNonNull(element.getAttribute("class")).contains("rc-imageselect-tileselected"))
+                            continue;
 
-                System.out.println("Indexes: " + targetIndexes);
+                        BufferedImage eleScreenshot;
+                        int scale = App.headless ? 1 : 2;
 
-                for(int index : targetIndexes){
-                    ElementClassificationResponse.Element responseElement = classificationResponse.getParsed_content_list().get(index);
-                    Pair<Double, Double> targetElementBBoxCenterPoint = getCenterPoint(responseElement.getBbox(), window);
-                    WebElement captchaTarget = getClosestElementAt(
-                            targetElementBBoxCenterPoint.alpha() - 80,
-                            targetElementBBoxCenterPoint.beta(),
-                            driver
-                    );
-                    clickTowardsElement(captchaTarget);
+                        Point point = element.getLocation();
+                        int eleWidth = (element.getSize().getWidth()) * scale;
+                        int eleHeight = (element.getSize().getHeight()) * scale;
+                        eleScreenshot = fullImg.getSubimage((point.getX() + 80) * scale, (point.getY() + 10) * scale, eleWidth, eleHeight);
+
+                        //boolean zipAround = true;
+                        //do {
+                        //    try {
+                        //        WebElement zipElementI = ArrayUtilities.getRandomItemFrom(driver.findElements(By.cssSelector("*")));
+                        //        actions.moveToElement(zipElementI)
+                        //                .build()
+                        //                .perform();
+                        //        zipAround = false;
+                        //    }
+                        //    catch (ElementNotInteractableException ignored){}
+                        //}
+                        //while (zipAround);
+
+
+                        File croppedSS = new File("element-crop#" + captchaOptions.indexOf(element) + ".png");
+                        ImageIO.write(eleScreenshot, "png", croppedSS);
+
+                        boolean containsObject = captchaBoxContainsObject(
+                                modelName,
+                                FileUtilities.getEncodedString(croppedSS),
+                                captchaObject,
+                                ollama
+                        );
+
+                        if (containsObject && !correctOptions.contains(element)) {
+                            correctOptions.add(element);
+                            correctChoiceCounter++;
+                        }
+                        else forbiddenIndexes.add(captchaOptions.indexOf(element));
+                    }
+
+                    System.out.println("Number of correct choices: " + correctOptions.size());
+
+                    for(WebElement element : correctOptions)
+                        if (!Objects.requireNonNull(element.getAttribute("class")).contains("rc-imageselect-tileselected")){
+                            if (correctOptions.indexOf(element) > 0){
+                                WebElement zipElementI = correctOptions.get(correctOptions.indexOf(element) - 1);
+
+                                moveMouseSmoothly(zipElementI.getLocation().x, zipElementI.getLocation().y , element.getLocation().x + 80, element.getLocation().y, 50, 15);
+                                actions.click(element).build().perform();
+                            }
+                            else
+                                actions.pause(Duration.of(1, ChronoUnit.SECONDS))
+                                    .moveByOffset(10,  15)
+                                    .scrollToElement(element)
+                                    .pause(Duration.of(1, ChronoUnit.SECONDS))
+                                    .moveToElement(element)
+                                    .pause(Duration.of(500, ChronoUnit.MILLIS))
+                                    .click()
+                                    .build()
+                                    .perform();
+
+                        }
+
+                    try {
+                        Thread.sleep(3000);
+                    } catch (InterruptedException e) {
+                        throw new RuntimeException(e);
+                    }//.rc-imageselect-tileselected
                 }
+                while (!correctOptions.isEmpty() && correctChoiceCounter < 10);
 
                 WebElement captchaVerifyButton = driver.findElement(By.id("recaptcha-verify-button"));
-
                 getSS();
-                captchaVerifyButton.click();
+                actions.moveToElement(captchaVerifyButton)
+                        .click(captchaVerifyButton)
+                        .build()
+                        .perform();
 
-                System.out.println(targetIndexes);
                 System.out.println("Checkpoint!");
 
+                try {
+                    Thread.sleep(3000);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
             }
             while (!driver.findElements(By.id("rc-imageselect")).isEmpty());
         }
-        catch (NoSuchElementException ignored){}
-        finally {
+        catch (NoSuchElementException ignored){} catch (AWTException e) {
+            throw new RuntimeException(e);
+        } finally {
             driver.switchTo().parentFrame();
+            driver.manage().window().setSize(originalWindow);
         }
     }
 
@@ -148,7 +210,8 @@ public class CaptchaBuster {
             Ollama ollama
     ){
         System.out.println("Assessing the Captcha object...");
-        String captchaBustingPrompt = "what is the object of this captcha?";
+        String captchaBustingPrompt = "select all images with a {objectName} \n" +
+                "What is 'objectName'?";
 
         InferenceModel inferenceModel = new InferenceModel.Builder()
                 .model(modelName)
@@ -162,6 +225,28 @@ public class CaptchaBuster {
                 CaptchaTargetObject.class,
                 "objectName"
         );
+    }
+
+    private boolean captchaBoxContainsObject(
+            String modelName,
+            String base64Image,
+            String objectName,
+            Ollama ollama
+    ){
+        String captchaBustingPrompt = "Does the image partially or fully contain " + objectName + " with very high confidence?";
+
+        InferenceModel inferenceModel = new InferenceModel.Builder()
+                .model(modelName)
+                .prompt(captchaBustingPrompt)
+                .temperature(1.0)
+                .images(List.of(base64Image))
+                .build();
+
+        return ollama.inference(
+                inferenceModel,
+                CaptchaVerdict.class,
+                "boxContainsObject"
+        ).getBoxContainsObject();
     }
 
     private CaptchaTargetIndexes getCaptchaTargetIndexes(
@@ -229,5 +314,18 @@ public class CaptchaBuster {
             throw new RuntimeException(e);
         }
         return element;
+    }
+
+    public static void moveMouseSmoothly(int startX, int startY, int endX, int endY, int steps, int delayMs) throws AWTException {
+        Robot robot = new Robot();
+        Random random = new Random();
+
+        for (int i = 0; i <= steps; i++) {
+            double t = (double) i / steps;
+            int x = (int) (startX + (endX - startX) * t + random.nextGaussian()); // Add slight jitter
+            int y = (int) (startY + (endY - startY) * t + random.nextGaussian());
+            robot.mouseMove(x, y);
+            robot.delay(delayMs + random.nextInt(10)); // Randomize delay slightly
+        }
     }
 }

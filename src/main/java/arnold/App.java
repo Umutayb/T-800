@@ -36,7 +36,7 @@ public class App {
     OmniParser omniParser;
     Ollama ollama;
 
-    boolean headless = false;
+    public static boolean headless = false;
 
     ChromeOptions options;
 

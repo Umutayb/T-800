@@ -22,7 +22,7 @@ public class OmniParser extends WasapiUtilities {
 
     public ElementClassificationResponse upload(String filePath){
         log.info("Uploading " + filePath + ".");
-        ParseRequest container = new ParseRequest(FileUtilities.getEncodedString(filePath), 0.15, 500);
+        ParseRequest container = new ParseRequest(FileUtilities.getEncodedString(filePath), 0.15, 650);
         Call<ElementClassificationResponse> messageCall = omniParserServer.parse(container);
         return perform(messageCall, true, false, ErrorModel.class);
     }
